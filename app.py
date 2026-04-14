@@ -1,17 +1,15 @@
 """
-Tracker de Salud — Esteban
-Registra alimentación, suplementos, bienestar y entrenamiento.
-Los datos se guardan en Google Sheets vía gspread.
+Tracker de Salud — Multi-usuario
+Login con usuario + contraseña. Cada usuario guarda en su propio Google Sheet.
 """
 
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date, datetime
-import json
-import pandas as pd
+import hashlib
 
-# ─── PAGE CONFIG ────────────────────────────────────────────────────────────
+# ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Tracker de Salud",
     page_icon="🏃",
@@ -19,47 +17,60 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ─── GOOGLE SHEETS AUTH ──────────────────────────────────────────────────────
+# ─── AUTH ─────────────────────────────────────────────────────────────────────
+USERS = {
+    "esteban": {
+        "password_hash": hashlib.sha256(st.secrets["passwords"]["esteban"].encode()).hexdigest(),
+        "spreadsheet_id": st.secrets["spreadsheets"]["esteban"],
+        "display_name": "Esteban",
+        "emoji": "🏃",
+    },
+    "esposa": {
+        "password_hash": hashlib.sha256(st.secrets["passwords"]["esposa"].encode()).hexdigest(),
+        "spreadsheet_id": st.secrets["spreadsheets"]["esposa"],
+        "display_name": st.secrets.get("display_names", {}).get("esposa", "Mi esposa"),
+        "emoji": "🌿",
+    },
+}
+
+
+def check_password(username: str, password: str) -> bool:
+    if username not in USERS:
+        return False
+    hashed = hashlib.sha256(password.encode()).hexdigest()
+    return hashed == USERS[username]["password_hash"]
+
+
+def login_screen():
+    st.markdown("<br>", unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("## 🏃 Tracker de Salud")
+        st.caption("Consulta medicina funcional — 18 mayo 2026")
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        with st.form("login_form"):
+            username = st.selectbox("Usuario", ["esteban", "esposa"],
+                                    format_func=lambda x: USERS[x]["display_name"])
+            password = st.text_input("Contraseña", type="password")
+            submitted = st.form_submit_button("Entrar", use_container_width=True, type="primary")
+
+            if submitted:
+                if check_password(username, password):
+                    st.session_state["logged_in"] = True
+                    st.session_state["username"] = username
+                    st.session_state["user"] = USERS[username]
+                    st.rerun()
+                else:
+                    st.error("Contraseña incorrecta")
+
+
+# ─── GOOGLE SHEETS ───────────────────────────────────────────────────────────
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-@st.cache_resource(ttl=3600)
-def get_spreadsheet(spreadsheet_id: str):
-    """Abre el spreadsheet UNA sola vez y lo cachea por 1 hora."""
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=SCOPES,
-    )
-    gc = gspread.authorize(creds)
-    try:
-        return gc.open_by_key(spreadsheet_id)
-    except gspread.SpreadsheetNotFound:
-        st.error(f"No se encontró el Spreadsheet con ID: {spreadsheet_id}")
-        st.stop()
-
-
-def get_gsheet_client():
-    return get_spreadsheet(st.secrets.get("spreadsheet_id", ""))
-
-
-def get_or_create_worksheet(gc, spreadsheet_id: str, sheet_name: str, headers: list[str]):
-    """Devuelve la hoja; la crea con cabeceras si no existe."""
-    sh = get_spreadsheet(spreadsheet_id)
-    try:
-        ws = sh.worksheet(sheet_name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
-        ws.append_row(headers)
-    return ws
-
-
-def append_row(ws, row: list):
-    ws.append_row(row, value_input_option="USER_ENTERED")
-
-
-# ─── SHEET HEADERS ───────────────────────────────────────────────────────────
 HEADERS = {
     "Suplementos": [
         "timestamp", "fecha", "NAC", "Mg_Glicinato", "Quercetina",
@@ -68,8 +79,7 @@ HEADERS = {
     ],
     "Alimentacion": [
         "timestamp", "fecha", "hora", "tipo_comida", "alimentos",
-        "reacciones_digestivas", "reacciones_energia", "reacciones_piel",
-        "notas",
+        "reacciones_digestivas", "reacciones_energia", "reacciones_piel", "notas",
     ],
     "Bienestar": [
         "timestamp", "fecha", "hora_dormir", "hora_despertar", "horas_sueno",
@@ -85,49 +95,72 @@ HEADERS = {
     ],
 }
 
-# ─── HELPERS ─────────────────────────────────────────────────────────────────
+
+@st.cache_resource(ttl=3600)
+def get_spreadsheet(spreadsheet_id: str):
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=SCOPES,
+    )
+    gc = gspread.authorize(creds)
+    try:
+        return gc.open_by_key(spreadsheet_id)
+    except gspread.SpreadsheetNotFound:
+        st.error(f"No se encontró el Spreadsheet con ID: {spreadsheet_id}")
+        st.stop()
+
+
+def get_or_create_worksheet(spreadsheet_id: str, sheet_name: str, headers: list):
+    sh = get_spreadsheet(spreadsheet_id)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
+        ws.append_row(headers)
+    return ws
+
+
+def append_row(ws, row: list):
+    ws.append_row(row, value_input_option="USER_ENTERED")
+
+
 def ts():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def multi_select_tags(label: str, options: list[str], key: str, default: list[str] = None):
+def multi_select_tags(label, options, key, default=None):
     return st.multiselect(label, options, default=default or [], key=key)
 
 
-# ─── SIDEBAR CONFIG ──────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Configuración")
-    spreadsheet_id = st.text_input(
-        "ID del Google Spreadsheet",
-        value=st.secrets.get("spreadsheet_id", ""),
-        help="El ID está en la URL: docs.google.com/spreadsheets/d/[ID]/edit",
-    )
-    st.caption("Asegúrate de compartir el Sheet con el service account email.")
-    st.divider()
-    st.caption("Tracker de Salud v1.0 · Consulta Dra. 18 mayo 2026")
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
 
-
-# ─── MAIN ────────────────────────────────────────────────────────────────────
-st.title("🏃 Tracker de Salud")
-st.caption("Registros para consulta de medicina funcional — 18 mayo 2026")
-
-if not spreadsheet_id:
-    st.warning("Ingresa el ID de tu Google Spreadsheet en la barra lateral para continuar.")
+if not st.session_state["logged_in"]:
+    login_screen()
     st.stop()
 
-try:
-    gc = get_gsheet_client()
-except Exception as e:
-    st.error(f"Error de autenticación con Google: {e}")
-    st.stop()
+# Usuario autenticado
+user = st.session_state["user"]
+spreadsheet_id = user["spreadsheet_id"]
 
-# Init worksheets
+# Init hojas del usuario
 for sheet_name, headers in HEADERS.items():
-    get_or_create_worksheet(gc, spreadsheet_id, sheet_name, headers)
+    get_or_create_worksheet(spreadsheet_id, sheet_name, headers)
+
+# ─── HEADER ──────────────────────────────────────────────────────────────────
+col1, col2 = st.columns([3, 1])
+with col1:
+    st.markdown(f"## {user['emoji']} Tracker de Salud — {user['display_name']}")
+    st.caption("Registros para consulta de medicina funcional — 18 mayo 2026")
+with col2:
+    if st.button("Cerrar sesión", key="logout"):
+        for key in ["logged_in", "username", "user"]:
+            st.session_state[key] = None
+        st.session_state["logged_in"] = False
+        st.rerun()
 
 fecha_hoy = st.date_input("📅 Fecha del registro", value=date.today())
 fecha_str = fecha_hoy.strftime("%Y-%m-%d")
-
 st.divider()
 
 tab_supps, tab_food, tab_wellness, tab_train = st.tabs([
@@ -143,7 +176,6 @@ with tab_supps:
     st.caption("Marca lo que tomaste hoy y anota sensaciones.")
 
     col1, col2 = st.columns(2)
-
     with col1:
         nac = st.checkbox("NAC (N-Acetil Cisteína)", key="s_nac")
         nota_nac = st.text_input("Nota NAC", placeholder="sensación, hora exacta...", key="n_nac") if nac else ""
@@ -161,18 +193,17 @@ with tab_supps:
         elec = st.checkbox("Electrolitos (running)", key="s_elec",
                            help="Sodio 1g · Potasio 200mg · Mg 60mg")
         nota_elec = st.text_input(
-            "Nota Electrolitos", placeholder="distancia, condiciones climáticas, calambres...", key="n_elec"
+            "Nota Electrolitos", placeholder="distancia, condiciones, calambres...", key="n_elec"
         ) if elec else ""
 
-    st.caption("Composición electrolitos: Na+ 1000 mg · K+ 200 mg · Mg²+ 60 mg por sesión de running")
-
-    notas_gen_s = st.text_area("Notas generales de suplementación", key="notas_supps",
+    st.caption("Electrolitos: Na+ 1000 mg · K+ 200 mg · Mg²+ 60 mg por sesión de running")
+    notas_gen_s = st.text_area("Notas generales", key="notas_supps",
                                 placeholder="cambios en el protocolo, sensaciones generales...")
 
     if st.button("💾 Guardar check-in de suplementos", type="primary", key="btn_supps"):
         with st.spinner("Guardando..."):
-            ws = get_or_create_worksheet(gc, spreadsheet_id, "Suplementos", HEADERS["Suplementos"])
-            row = [
+            ws = get_or_create_worksheet(spreadsheet_id, "Suplementos", HEADERS["Suplementos"])
+            append_row(ws, [
                 ts(), fecha_str,
                 "SÍ" if nac else "NO",
                 "SÍ" if mg else "NO",
@@ -181,9 +212,8 @@ with tab_supps:
                 "SÍ" if elec else "NO",
                 nota_nac, nota_mg, nota_querc, nota_creat, nota_elec,
                 notas_gen_s,
-            ]
-            append_row(ws, row)
-        st.success("✅ Check-in guardado en Google Sheets")
+            ])
+        st.success("✅ Check-in guardado")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -196,53 +226,39 @@ with tab_food:
     with col1:
         tipo_comida = st.selectbox("Tipo de comida", [
             "Desayuno", "Almuerzo", "Cena",
-            "Merienda AM", "Merienda PM",
-            "Pre-entreno", "Post-entreno",
+            "Merienda AM", "Merienda PM", "Pre-entreno", "Post-entreno",
         ], key="f_tipo")
     with col2:
         hora_comida = st.time_input("Hora", value=datetime.now().time(), key="f_hora")
 
-    st.markdown("**Alimentos consumidos**")
     alimentos = st.text_area(
-        "Lista los alimentos (uno por línea: alimento, cantidad, cocción, marca)",
-        placeholder="arroz integral, 150g, cocido\npollo, 180g, a la plancha, Macropollo\nbrócolí, 100g, al vapor",
-        height=120,
-        key="f_alimentos",
+        "Alimentos (uno por línea: alimento, cantidad, cocción, marca)",
+        placeholder="arroz integral, 150g, cocido\npollo, 180g, a la plancha\nbrócolí, 100g, al vapor",
+        height=120, key="f_alimentos",
     )
 
     st.markdown("**Reacciones percibidas** (hasta 2h después)")
-
-    reac_dig = multi_select_tags(
-        "Digestivas",
+    reac_dig = multi_select_tags("Digestivas",
         ["sin síntomas", "distensión", "gases", "reflujo", "náuseas", "diarrea", "estreñimiento", "dolor abdominal"],
-        key="f_dig", default=["sin síntomas"],
-    )
-    reac_energy = multi_select_tags(
-        "Energía y ánimo",
+        key="f_dig", default=["sin síntomas"])
+    reac_energy = multi_select_tags("Energía y ánimo",
         ["energía estable", "pico de energía", "bajón post-comida", "somnolencia", "irritabilidad", "ansiedad", "foco mental", "niebla mental"],
-        key="f_energy", default=["energía estable"],
-    )
-    reac_skin = multi_select_tags(
-        "Piel / sistémicos",
+        key="f_energy", default=["energía estable"])
+    reac_skin = multi_select_tags("Piel / sistémicos",
         ["sin cambios", "picazón", "urticaria", "enrojecimiento", "congestión nasal", "cefalea", "fatiga inusual", "dolor muscular"],
-        key="f_skin", default=["sin cambios"],
-    )
+        key="f_skin", default=["sin cambios"])
 
     notas_comida = st.text_area("Notas (contexto, hambre previa, velocidad al comer...)", key="f_notas")
 
     if st.button("💾 Guardar comida", type="primary", key="btn_food"):
         with st.spinner("Guardando..."):
-            ws = get_or_create_worksheet(gc, spreadsheet_id, "Alimentacion", HEADERS["Alimentacion"])
-            row = [
-                ts(), fecha_str,
-                str(hora_comida), tipo_comida,
+            ws = get_or_create_worksheet(spreadsheet_id, "Alimentacion", HEADERS["Alimentacion"])
+            append_row(ws, [
+                ts(), fecha_str, str(hora_comida), tipo_comida,
                 alimentos.replace("\n", " | "),
-                ", ".join(reac_dig),
-                ", ".join(reac_energy),
-                ", ".join(reac_skin),
+                ", ".join(reac_dig), ", ".join(reac_energy), ", ".join(reac_skin),
                 notas_comida,
-            ]
-            append_row(ws, row)
+            ])
         st.success("✅ Comida guardada")
 
 
@@ -258,8 +274,10 @@ with tab_wellness:
         hora_dormir = st.time_input("Me dormí a las", key="w_sin")
         hora_despertar = st.time_input("Desperté a las", key="w_sout")
     with col2:
-        horas_sueno = st.number_input("Horas estimadas", min_value=0.0, max_value=14.0, value=7.5, step=0.5, key="w_hrs")
-        calidad_sueno = st.select_slider("Calidad del sueño", options=[1, 2, 3, 4, 5], value=3, key="w_calidad",
+        horas_sueno = st.number_input("Horas estimadas", min_value=0.0, max_value=14.0,
+                                       value=7.5, step=0.5, key="w_hrs")
+        calidad_sueno = st.select_slider("Calidad del sueño", options=[1, 2, 3, 4, 5],
+                                          value=3, key="w_calidad",
                                           format_func=lambda x: "★" * x)
     with col3:
         interrupciones = st.selectbox("Interrupciones", ["ninguna", "1 vez", "2 veces", "3+ veces"], key="w_wk")
@@ -272,8 +290,10 @@ with tab_wellness:
         energia_am = st.slider("Energía AM (1–10)", 1, 10, 7, key="w_eam")
         energia_pm = st.slider("Energía PM (1–10)", 1, 10, 6, key="w_epm")
     with col2:
-        animo = st.selectbox("Estado de ánimo", ["excelente", "bueno", "neutral", "bajo", "irritable", "ansioso", "deprimido"], key="w_mood")
-        foco = st.selectbox("Foco / concentración", ["muy buena", "buena", "regular", "pobre", "niebla mental"], key="w_foco")
+        animo = st.selectbox("Estado de ánimo",
+            ["excelente", "bueno", "neutral", "bajo", "irritable", "ansioso", "deprimido"], key="w_mood")
+        foco = st.selectbox("Foco / concentración",
+            ["muy buena", "buena", "regular", "pobre", "niebla mental"], key="w_foco")
         estres = st.selectbox("Estrés percibido", ["bajo", "moderado", "alto", "muy alto"], key="w_stress")
     agua = st.number_input("Agua (vasos)", min_value=0, max_value=20, value=8, key="w_water")
 
@@ -295,15 +315,14 @@ with tab_wellness:
 
     if st.button("💾 Guardar bienestar del día", type="primary", key="btn_well"):
         with st.spinner("Guardando..."):
-            ws = get_or_create_worksheet(gc, spreadsheet_id, "Bienestar", HEADERS["Bienestar"])
-            row = [
+            ws = get_or_create_worksheet(spreadsheet_id, "Bienestar", HEADERS["Bienestar"])
+            append_row(ws, [
                 ts(), fecha_str,
                 str(hora_dormir), str(hora_despertar), horas_sueno,
                 calidad_sueno, interrupciones, sensacion,
                 energia_am, energia_pm, animo, foco, estres, agua,
                 recuperacion, dolor, zona_dolor, gut, otros, notas_wellness,
-            ]
-            append_row(ws, row)
+            ])
         st.success("✅ Bienestar del día guardado")
 
 
@@ -328,7 +347,7 @@ with tab_train:
     col1, col2, col3 = st.columns(3)
     with col1:
         rpe = st.slider("RPE (1–10)", 1, 10, 7, key="t_rpe",
-                        help="Rate of Perceived Exertion: 1 muy fácil, 10 máximo esfuerzo")
+                        help="1 = muy fácil · 10 = máximo esfuerzo")
     with col2:
         rendimiento = st.selectbox("Rendimiento vs expectativa", [
             "superó expectativa", "según lo planeado", "por debajo", "sesión comprometida"
@@ -339,7 +358,7 @@ with tab_train:
         ], key="t_piri")
 
     if piriforme in ["dolor moderado", "tuve que parar"]:
-        st.warning("⚠️ Considera revisar el plan de esta semana y aplicar el protocolo de recuperación.")
+        st.warning("⚠️ Considera aplicar el protocolo de recuperación.")
 
     st.divider()
     st.markdown("**Si fue carrera**")
@@ -349,7 +368,7 @@ with tab_train:
     with col2:
         run_elev = st.number_input("Desnivel + (m)", min_value=0, key="t_elev")
     with col3:
-        run_tiempo = st.text_input("Tiempo total (mm:ss)", placeholder="55:30", key="t_time")
+        run_tiempo = st.text_input("Tiempo (mm:ss)", placeholder="55:30", key="t_time")
     with col4:
         run_hr = st.number_input("FC promedio (bpm)", min_value=0, key="t_hr")
 
@@ -358,18 +377,16 @@ with tab_train:
     st.caption("Formato: Ejercicio | Series×Reps | Peso kg | Nota")
     fuerza_log = st.text_area(
         "Ejercicios",
-        placeholder="Sentadilla trasera | 4×8 | 90kg | buena activación\nPress banca | 4×8 | 70kg | pecho bien activado\nPeso muerto | 3×6 | 110kg | espalda baja leve fatiga",
-        height=130,
-        key="t_fuerza",
+        placeholder="Sentadilla trasera | 4×8 | 90kg | buena activación\nPress banca | 4×8 | 70kg | ok\nPeso muerto | 3×6 | 110kg | leve fatiga lumbar",
+        height=120, key="t_fuerza",
     )
-
     notas_train = st.text_area("Sensaciones post-entreno", key="t_notas",
-                                placeholder="bombeo, fatiga, dolor articular, energía después, ánimo post-sesión...")
+                                placeholder="bombeo, fatiga, dolor articular, energía después...")
 
     if st.button("💾 Guardar sesión de entrenamiento", type="primary", key="btn_train"):
         with st.spinner("Guardando..."):
-            ws = get_or_create_worksheet(gc, spreadsheet_id, "Entrenamiento", HEADERS["Entrenamiento"])
-            row = [
+            ws = get_or_create_worksheet(spreadsheet_id, "Entrenamiento", HEADERS["Entrenamiento"])
+            append_row(ws, [
                 ts(), fecha_str, str(hora_train),
                 tipo_sesion, duracion, rpe, rendimiento, piriforme,
                 run_km if run_km > 0 else "",
@@ -378,11 +395,10 @@ with tab_train:
                 run_hr if run_hr > 0 else "",
                 fuerza_log.replace("\n", " | "),
                 notas_train,
-            ]
-            append_row(ws, row)
+            ])
         st.success("✅ Sesión guardada")
 
 
 # ─── FOOTER ──────────────────────────────────────────────────────────────────
 st.divider()
-st.caption("💡 Los datos se guardan en 4 hojas de tu Google Sheet: Suplementos · Alimentacion · Bienestar · Entrenamiento")
+st.caption(f"💡 Datos de {user['display_name']} · Suplementos · Alimentacion · Bienestar · Entrenamiento")
