@@ -25,51 +25,33 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-@st.cache_resource(ttl=600)
-def get_gsheet_client():
-    """
-    Autentica con Google Sheets.
-    Las credenciales vienen de st.secrets["gcp_service_account"].
-    Ver README para cómo configurarlas.
-    """
+@st.cache_resource(ttl=3600)
+def get_spreadsheet(spreadsheet_id: str):
+    """Abre el spreadsheet UNA sola vez y lo cachea por 1 hora."""
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=SCOPES,
     )
-    return gspread.authorize(creds)
-
-
-@st.cache_resource(ttl=600)
-def get_all_worksheets(spreadsheet_id: str):
-    gc = get_gsheet_client()
-    sh = gc.open_by_key(spreadsheet_id)
-    return sh
-
-def get_or_create_worksheet(gc, spreadsheet_id: str, sheet_name: str, headers: list[str]):
-    sh = get_all_worksheets(spreadsheet_id)
+    gc = gspread.authorize(creds)
     try:
-        ws = sh.worksheet(sheet_name)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
-        ws.append_row(headers)
-    return ws
-    """Devuelve la hoja; la crea con cabeceras si no existe."""
-    try:
-        sh = gc.open_by_key(spreadsheet_id)
+        return gc.open_by_key(spreadsheet_id)
     except gspread.SpreadsheetNotFound:
         st.error(f"No se encontró el Spreadsheet con ID: {spreadsheet_id}")
         st.stop()
 
+
+def get_gsheet_client():
+    return get_spreadsheet(st.secrets.get("spreadsheet_id", ""))
+
+
+def get_or_create_worksheet(gc, spreadsheet_id: str, sheet_name: str, headers: list[str]):
+    """Devuelve la hoja; la crea con cabeceras si no existe."""
+    sh = get_spreadsheet(spreadsheet_id)
     try:
         ws = sh.worksheet(sheet_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
         ws.append_row(headers)
-
-    # Si la hoja existe pero no tiene cabeceras aún, las agrega
-    if ws.row_count == 0 or ws.cell(1, 1).value != headers[0]:
-        ws.insert_row(headers, index=1)
-
     return ws
 
 
