@@ -25,7 +25,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-@st.cache_resource
+@st.cache_resource(ttl=600)
 def get_gsheet_client():
     """
     Autentica con Google Sheets.
@@ -39,7 +39,20 @@ def get_gsheet_client():
     return gspread.authorize(creds)
 
 
+@st.cache_resource(ttl=600)
+def get_all_worksheets(spreadsheet_id: str):
+    gc = get_gsheet_client()
+    sh = gc.open_by_key(spreadsheet_id)
+    return sh
+
 def get_or_create_worksheet(gc, spreadsheet_id: str, sheet_name: str, headers: list[str]):
+    sh = get_all_worksheets(spreadsheet_id)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
+        ws.append_row(headers)
+    return ws
     """Devuelve la hoja; la crea con cabeceras si no existe."""
     try:
         sh = gc.open_by_key(spreadsheet_id)
