@@ -8,6 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import date, datetime
 import hashlib
+import pytz
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -16,6 +17,18 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
+
+# ─── TIMEZONE FIX (Panama = UTC-5, sin DST) ──────────────────────────────────
+TZ_PANAMA = pytz.timezone("America/Panama")
+
+def now_panama() -> datetime:
+    return datetime.now(TZ_PANAMA)
+
+def today_panama() -> date:
+    return now_panama().date()
+
+def ts() -> str:
+    return now_panama().strftime("%Y-%m-%d %H:%M:%S")
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
 USERS = {
@@ -123,12 +136,23 @@ def append_row(ws, row: list):
     ws.append_row(row, value_input_option="USER_ENTERED")
 
 
-def ts():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
 def multi_select_tags(label, options, key, default=None):
     return st.multiselect(label, options, default=default or [], key=key)
+
+
+@st.cache_data(ttl=60)  # refresca cada 60 segundos
+def get_all_records(spreadsheet_id: str, sheet_name: str) -> list[dict]:
+    """Lee todos los registros de una hoja. Retorna lista vacía si falla."""
+    try:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"], scopes=SCOPES,
+        )
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(spreadsheet_id)
+        ws = sh.worksheet(sheet_name)
+        return ws.get_all_records()
+    except Exception:
+        return []
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
@@ -159,13 +183,164 @@ with col2:
         st.session_state["logged_in"] = False
         st.rerun()
 
-fecha_hoy = st.date_input("📅 Fecha del registro", value=date.today())
+# Fecha con zona horaria de Panamá
+fecha_hoy = st.date_input("📅 Fecha del registro", value=today_panama())
 fecha_str = fecha_hoy.strftime("%Y-%m-%d")
 st.divider()
 
-tab_supps, tab_food, tab_wellness, tab_train = st.tabs([
-    "💊 Suplementos", "🥦 Alimentación", "🌙 Bienestar", "🏋️ Entrenamiento"
+tab_dash, tab_supps, tab_food, tab_wellness, tab_train = st.tabs([
+    "📊 Dashboard", "💊 Suplementos", "🥦 Alimentación", "🌙 Bienestar", "🏋️ Entrenamiento"
 ])
+
+
+# ═══════════════════════════════════════════════════════════
+# TAB 0 — DASHBOARD
+# ═══════════════════════════════════════════════════════════
+with tab_dash:
+    if st.button("🔄 Refrescar datos", key="refresh"):
+        st.cache_data.clear()
+        st.rerun()
+        
+    st.subheader(f"Resumen de hoy · {fecha_hoy.strftime('%A %d de %B')}")
+
+    # ── Leer datos ──────────────────────────────────────────
+    records_supp  = get_all_records(spreadsheet_id, "Suplementos")
+    records_food  = get_all_records(spreadsheet_id, "Alimentacion")
+    records_well  = get_all_records(spreadsheet_id, "Bienestar")
+    records_train = get_all_records(spreadsheet_id, "Entrenamiento")
+
+    today_str = fecha_str
+
+    supp_hoy   = [r for r in records_supp  if r.get("fecha") == today_str]
+    food_hoy   = [r for r in records_food  if r.get("fecha") == today_str]
+    well_hoy   = [r for r in records_well  if r.get("fecha") == today_str]
+    train_hoy  = [r for r in records_train if r.get("fecha") == today_str]
+
+    # ── Checklist del día ──────────────────────────────────
+    st.markdown("#### ✅ Checklist del día")
+
+    comidas_hoy = {r.get("tipo_comida", "") for r in food_hoy}
+    checks = {
+        "Desayuno":          "Desayuno"   in comidas_hoy,
+        "Almuerzo":          "Almuerzo"   in comidas_hoy,
+        "Cena":              "Cena"        in comidas_hoy,
+        "Suplementos":       len(supp_hoy) > 0,
+        "Entrenamiento":     len(train_hoy) > 0,
+        "Bienestar diario":  len(well_hoy) > 0,
+    }
+
+    total_done = sum(checks.values())
+    pct = int(total_done / len(checks) * 100)
+    st.progress(pct / 100, text=f"{pct}% completado hoy ({total_done}/{len(checks)})")
+    st.markdown("")
+
+    cols = st.columns(3)
+    for i, (label, done) in enumerate(checks.items()):
+        with cols[i % 3]:
+            icon = "✅" if done else "⏳"
+            color = "green" if done else "orange"
+            st.markdown(
+                f":{color}[{icon} **{label}**]"
+                if done else
+                f":{color}[{icon} {label}]"
+            )
+
+    st.divider()
+
+    # ── Resumen del día ─────────────────────────────────────
+    st.markdown("#### 📋 Resumen del día")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Alimentación
+        if food_hoy:
+            comidas_list = ", ".join(r.get("tipo_comida","") for r in food_hoy)
+            st.markdown(f"🍽 **{len(food_hoy)} comida(s):** {comidas_list}")
+        else:
+            st.markdown("🍽 Sin comidas registradas")
+
+        # Suplementos
+        if supp_hoy:
+            r = supp_hoy[-1]
+            tomados = [k for k in ["NAC","Mg_Glicinato","Quercetina","Creatina","Electrolitos_running"] if r.get(k)=="SÍ"]
+            st.markdown(f"💊 **Suplementos:** {', '.join(tomados) if tomados else 'ninguno marcado'}")
+        else:
+            st.markdown("💊 Suplementos no registrados")
+
+    with col2:
+        # Entrenamiento
+        if train_hoy:
+            r = train_hoy[-1]
+            st.markdown(f"🏋️ **{r.get('tipo_sesion','')}** · {r.get('duracion_min','')} min · RPE {r.get('RPE','')}")
+            piri = r.get("piriforme","—")
+            piri_color = "red" if "dolor" in piri or "parar" in piri else "green"
+            st.markdown(f"Piriforme: :{piri_color}[{piri}]")
+        else:
+            st.markdown("🏋️ Sin entrenamiento registrado")
+
+        # Bienestar
+        if well_hoy:
+            r = well_hoy[-1]
+            st.markdown(
+                f"😴 Sueño **{r.get('calidad_sueno','—')}/5** · "
+                f"Energía AM **{r.get('energia_AM','—')}/10** · "
+                f"Agua **{r.get('agua_vasos','—')} vasos**"
+            )
+        else:
+            st.markdown("😴 Bienestar no registrado")
+
+    st.divider()
+
+    # ── Tendencias 7 días ──────────────────────────────────
+    st.markdown("#### 📈 Últimos 7 días")
+
+    from datetime import timedelta
+    last_7 = [(fecha_hoy - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+
+    # Métricas de bienestar
+    energia_vals = []
+    sueno_vals   = []
+    for d in last_7:
+        rows = [r for r in records_well if r.get("fecha") == d]
+        if rows:
+            r = rows[-1]
+            try:
+                energia_vals.append((d, int(r.get("energia_AM", 0))))
+                sueno_vals.append((d, int(r.get("calidad_sueno", 0))))
+            except (ValueError, TypeError):
+                pass
+
+    sesiones_semana = sum(1 for d in last_7 if any(r.get("fecha") == d for r in records_train))
+    comidas_semana  = sum(1 for r in records_food if r.get("fecha","") in last_7)
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        avg_e = round(sum(v for _, v in energia_vals) / len(energia_vals), 1) if energia_vals else None
+        st.metric("Energía AM prom.", f"{avg_e}/10" if avg_e else "—")
+    with c2:
+        avg_s = round(sum(v for _, v in sueno_vals) / len(sueno_vals), 1) if sueno_vals else None
+        st.metric("Sueño prom.", f"{avg_s}/5" if avg_s else "—")
+    with c3:
+        st.metric("Sesiones de entreno", f"{sesiones_semana} días")
+    with c4:
+        st.metric("Comidas registradas", comidas_semana)
+
+    # Mini chart de energía
+    if energia_vals:
+        st.markdown("**Energía AM por día**")
+        import pandas as pd
+        df_e = pd.DataFrame(energia_vals, columns=["fecha", "Energía AM"])
+        df_e["fecha"] = df_e["fecha"].str[5:]  # MM-DD
+        st.bar_chart(df_e.set_index("fecha"), height=180, use_container_width=True)
+
+    # Piriforme últimos 7 días
+    piri_semana = [(r.get("fecha",""), r.get("piriforme","")) for r in records_train if r.get("fecha","") in last_7]
+    if piri_semana:
+        st.markdown("**Piriforme esta semana:**")
+        for d, p in piri_semana:
+            color = "red" if "dolor" in p or "parar" in p else "green"
+            st.markdown(f"- {d}: :{color}[{p}]")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -229,7 +404,7 @@ with tab_food:
             "Merienda AM", "Merienda PM", "Pre-entreno", "Post-entreno",
         ], key="f_tipo")
     with col2:
-        hora_comida = st.time_input("Hora", value=datetime.now().time(), key="f_hora")
+        hora_comida = st.time_input("Hora", value=now_panama().time(), key="f_hora")
 
     alimentos = st.text_area(
         "Alimentos (uno por línea: alimento, cantidad, cocción, marca)",
