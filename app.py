@@ -6,9 +6,10 @@ Login con usuario + contraseña. Cada usuario guarda en su propio Google Sheet.
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import pytz
+import pandas as pd
 
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -110,11 +111,16 @@ HEADERS = {
 
 
 @st.cache_resource(ttl=3600)
-def get_spreadsheet(spreadsheet_id: str):
+def get_gspread_client():
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPES,
     )
-    gc = gspread.authorize(creds)
+    return gspread.authorize(creds)
+
+
+@st.cache_resource(ttl=3600)
+def get_spreadsheet(spreadsheet_id: str):
+    gc = get_gspread_client()
     try:
         return gc.open_by_key(spreadsheet_id)
     except gspread.SpreadsheetNotFound:
@@ -122,14 +128,25 @@ def get_spreadsheet(spreadsheet_id: str):
         st.stop()
 
 
+@st.cache_resource(ttl=3600)
+def init_worksheets(spreadsheet_id: str):
+    """Crea las hojas que no existan. Solo corre una vez por sesión."""
+    sh = get_spreadsheet(spreadsheet_id)
+    existing = [ws.title for ws in sh.worksheets()]
+    for sheet_name, headers in HEADERS.items():
+        if sheet_name not in existing:
+            ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
+            ws.append_row(headers)
+
+
 def get_or_create_worksheet(spreadsheet_id: str, sheet_name: str, headers: list):
     sh = get_spreadsheet(spreadsheet_id)
     try:
-        ws = sh.worksheet(sheet_name)
+        return sh.worksheet(sheet_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
         ws.append_row(headers)
-    return ws
+        return ws
 
 
 def append_row(ws, row: list):
@@ -140,14 +157,11 @@ def multi_select_tags(label, options, key, default=None):
     return st.multiselect(label, options, default=default or [], key=key)
 
 
-@st.cache_data(ttl=60)  # refresca cada 60 segundos
+@st.cache_data(ttl=60)
 def get_all_records(spreadsheet_id: str, sheet_name: str) -> list[dict]:
-    """Lee todos los registros de una hoja. Retorna lista vacía si falla."""
+    """Lee todos los registros. Cacheado 60s para evitar 429."""
     try:
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"], scopes=SCOPES,
-        )
-        gc = gspread.authorize(creds)
+        gc = get_gspread_client()
         sh = gc.open_by_key(spreadsheet_id)
         ws = sh.worksheet(sheet_name)
         return ws.get_all_records()
@@ -167,9 +181,8 @@ if not st.session_state["logged_in"]:
 user = st.session_state["user"]
 spreadsheet_id = user["spreadsheet_id"]
 
-# Init hojas del usuario
-for sheet_name, headers in HEADERS.items():
-    get_or_create_worksheet(spreadsheet_id, sheet_name, headers)
+# Init hojas — una sola vez por sesión, sin loop de llamadas repetidas
+init_worksheets(spreadsheet_id)
 
 # ─── HEADER ──────────────────────────────────────────────────────────────────
 col1, col2 = st.columns([3, 1])
@@ -183,7 +196,6 @@ with col2:
         st.session_state["logged_in"] = False
         st.rerun()
 
-# Fecha con zona horaria de Panamá
 fecha_hoy = st.date_input("📅 Fecha del registro", value=today_panama())
 fecha_str = fecha_hoy.strftime("%Y-%m-%d")
 st.divider()
@@ -200,33 +212,30 @@ with tab_dash:
     if st.button("🔄 Refrescar datos", key="refresh"):
         st.cache_data.clear()
         st.rerun()
-        
+
     st.subheader(f"Resumen de hoy · {fecha_hoy.strftime('%A %d de %B')}")
 
-    # ── Leer datos ──────────────────────────────────────────
     records_supp  = get_all_records(spreadsheet_id, "Suplementos")
     records_food  = get_all_records(spreadsheet_id, "Alimentacion")
     records_well  = get_all_records(spreadsheet_id, "Bienestar")
     records_train = get_all_records(spreadsheet_id, "Entrenamiento")
 
-    today_str = fecha_str
-
-    supp_hoy   = [r for r in records_supp  if r.get("fecha") == today_str]
-    food_hoy   = [r for r in records_food  if r.get("fecha") == today_str]
-    well_hoy   = [r for r in records_well  if r.get("fecha") == today_str]
-    train_hoy  = [r for r in records_train if r.get("fecha") == today_str]
+    supp_hoy  = [r for r in records_supp  if r.get("fecha") == fecha_str]
+    food_hoy  = [r for r in records_food  if r.get("fecha") == fecha_str]
+    well_hoy  = [r for r in records_well  if r.get("fecha") == fecha_str]
+    train_hoy = [r for r in records_train if r.get("fecha") == fecha_str]
 
     # ── Checklist del día ──────────────────────────────────
     st.markdown("#### ✅ Checklist del día")
 
     comidas_hoy = {r.get("tipo_comida", "") for r in food_hoy}
     checks = {
-        "Desayuno":          "Desayuno"   in comidas_hoy,
-        "Almuerzo":          "Almuerzo"   in comidas_hoy,
-        "Cena":              "Cena"        in comidas_hoy,
-        "Suplementos":       len(supp_hoy) > 0,
-        "Entrenamiento":     len(train_hoy) > 0,
-        "Bienestar diario":  len(well_hoy) > 0,
+        "Desayuno":         "Desayuno" in comidas_hoy,
+        "Almuerzo":         "Almuerzo" in comidas_hoy,
+        "Cena":             "Cena" in comidas_hoy,
+        "Suplementos":      len(supp_hoy) > 0,
+        "Entrenamiento":    len(train_hoy) > 0,
+        "Bienestar diario": len(well_hoy) > 0,
     }
 
     total_done = sum(checks.values())
@@ -240,46 +249,39 @@ with tab_dash:
             icon = "✅" if done else "⏳"
             color = "green" if done else "orange"
             st.markdown(
-                f":{color}[{icon} **{label}**]"
-                if done else
-                f":{color}[{icon} {label}]"
+                f":{color}[{icon} **{label}**]" if done else f":{color}[{icon} {label}]"
             )
 
     st.divider()
 
     # ── Resumen del día ─────────────────────────────────────
     st.markdown("#### 📋 Resumen del día")
-
     col1, col2 = st.columns(2)
 
     with col1:
-        # Alimentación
         if food_hoy:
-            comidas_list = ", ".join(r.get("tipo_comida","") for r in food_hoy)
+            comidas_list = ", ".join(r.get("tipo_comida", "") for r in food_hoy)
             st.markdown(f"🍽 **{len(food_hoy)} comida(s):** {comidas_list}")
         else:
             st.markdown("🍽 Sin comidas registradas")
 
-        # Suplementos
         if supp_hoy:
             r = supp_hoy[-1]
-            tomados = [k for k in ["NAC","Mg_Glicinato","Quercetina","Creatina","Electrolitos_running"] if r.get(k)=="SÍ"]
+            tomados = [k for k in ["NAC", "Mg_Glicinato", "Quercetina", "Creatina", "Electrolitos_running"] if r.get(k) == "SÍ"]
             st.markdown(f"💊 **Suplementos:** {', '.join(tomados) if tomados else 'ninguno marcado'}")
         else:
             st.markdown("💊 Suplementos no registrados")
 
     with col2:
-        # Entrenamiento
         if train_hoy:
             r = train_hoy[-1]
             st.markdown(f"🏋️ **{r.get('tipo_sesion','')}** · {r.get('duracion_min','')} min · RPE {r.get('RPE','')}")
-            piri = r.get("piriforme","—")
+            piri = r.get("piriforme", "—")
             piri_color = "red" if "dolor" in piri or "parar" in piri else "green"
             st.markdown(f"Piriforme: :{piri_color}[{piri}]")
         else:
             st.markdown("🏋️ Sin entrenamiento registrado")
 
-        # Bienestar
         if well_hoy:
             r = well_hoy[-1]
             st.markdown(
@@ -295,12 +297,9 @@ with tab_dash:
     # ── Tendencias 7 días ──────────────────────────────────
     st.markdown("#### 📈 Últimos 7 días")
 
-    from datetime import timedelta
     last_7 = [(fecha_hoy - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
 
-    # Métricas de bienestar
-    energia_vals = []
-    sueno_vals   = []
+    energia_vals, sueno_vals = [], []
     for d in last_7:
         rows = [r for r in records_well if r.get("fecha") == d]
         if rows:
@@ -312,7 +311,7 @@ with tab_dash:
                 pass
 
     sesiones_semana = sum(1 for d in last_7 if any(r.get("fecha") == d for r in records_train))
-    comidas_semana  = sum(1 for r in records_food if r.get("fecha","") in last_7)
+    comidas_semana  = sum(1 for r in records_food if r.get("fecha", "") in last_7)
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
@@ -326,16 +325,13 @@ with tab_dash:
     with c4:
         st.metric("Comidas registradas", comidas_semana)
 
-    # Mini chart de energía
     if energia_vals:
         st.markdown("**Energía AM por día**")
-        import pandas as pd
         df_e = pd.DataFrame(energia_vals, columns=["fecha", "Energía AM"])
-        df_e["fecha"] = df_e["fecha"].str[5:]  # MM-DD
+        df_e["fecha"] = df_e["fecha"].str[5:]
         st.bar_chart(df_e.set_index("fecha"), height=180, use_container_width=True)
 
-    # Piriforme últimos 7 días
-    piri_semana = [(r.get("fecha",""), r.get("piriforme","")) for r in records_train if r.get("fecha","") in last_7]
+    piri_semana = [(r.get("fecha", ""), r.get("piriforme", "")) for r in records_train if r.get("fecha", "") in last_7]
     if piri_semana:
         st.markdown("**Piriforme esta semana:**")
         for d, p in piri_semana:
@@ -365,11 +361,8 @@ with tab_supps:
         creat = st.checkbox("Creatina", key="s_creat")
         nota_creat = st.text_input("Nota Creatina", placeholder="pump, rendimiento...", key="n_creat") if creat else ""
 
-        elec = st.checkbox("Electrolitos (running)", key="s_elec",
-                           help="Sodio 1g · Potasio 200mg · Mg 60mg")
-        nota_elec = st.text_input(
-            "Nota Electrolitos", placeholder="distancia, condiciones, calambres...", key="n_elec"
-        ) if elec else ""
+        elec = st.checkbox("Electrolitos (running)", key="s_elec", help="Sodio 1g · Potasio 200mg · Mg 60mg")
+        nota_elec = st.text_input("Nota Electrolitos", placeholder="distancia, condiciones, calambres...", key="n_elec") if elec else ""
 
     st.caption("Electrolitos: Na+ 1000 mg · K+ 200 mg · Mg²+ 60 mg por sesión de running")
     notas_gen_s = st.text_area("Notas generales", key="notas_supps",
