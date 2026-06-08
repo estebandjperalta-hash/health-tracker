@@ -403,55 +403,123 @@ with tab_cena:
     food_form("Cena", "Cena", "🌙", spreadsheet_id, fecha_str)
 
 
+# ─── LISTA DE SUPLEMENTOS POR USUARIO ────────────────────────────────────────
+SUPLEMENTOS_ESTEBAN = [
+    {"nombre": "NAC",                  "dosis": "600 mg",     "instruccion": "1x día · noche"},
+    {"nombre": "Quercetina",           "dosis": "500 mg",     "instruccion": "2x día"},
+    {"nombre": "Cúrcuma",              "dosis": "1000 mg",    "instruccion": "1x día · con comida"},
+    {"nombre": "Omega 3",              "dosis": "1000 mg",    "instruccion": "2x día · con comida"},
+    {"nombre": "Colágeno",             "dosis": "10 g",       "instruccion": "1x día"},
+    {"nombre": "Magnesio Glicinato",   "dosis": "300 mg",     "instruccion": "1x día · noche"},
+    {"nombre": "Hierro",               "dosis": "30 mg",      "instruccion": "1x día · ayunas o entre comidas"},
+    {"nombre": "Vitamina D3 + K2",     "dosis": "5000 UI",    "instruccion": "1x día"},
+]
+
 # ═══════════════════════════════════════════════════════════
 # SUPLEMENTOS
 # ═══════════════════════════════════════════════════════════
 with tab_supps:
     st.subheader("💊 Suplementos del día")
-    st.caption("Registra cada suplemento por separado para llevar historial limpio.")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        suplemento = st.text_input("Suplemento", placeholder="NAC, Magnesio, Vitamina D...",
-                                    key="supp_nombre")
-        dosis = st.text_input("Dosis", placeholder="600 mg, 1 cápsula...", key="supp_dosis")
-    with col2:
-        tomado = st.radio("¿Lo tomaste?", ["SÍ", "NO"], horizontal=True, key="supp_tomado")
-        hora_supp = st.time_input("Hora de toma", value=now_panama().time(), key="supp_hora")
-    with col3:
-        nota_supp = st.text_area("Nota", placeholder="sensación, con comida, en ayunas...",
-                                  height=100, key="supp_nota")
+    username = st.session_state.get("username", "")
 
-    if st.button("💾 Guardar suplemento", type="primary", key="btn_supp"):
-        if not suplemento.strip():
-            st.warning("Escribe el nombre del suplemento.")
-        else:
-            with st.spinner("Guardando..."):
-                ws = get_worksheet(spreadsheet_id, "Suplementos")
-                append_row(ws, [
-                    ts(), fecha_str,
-                    suplemento.strip(), dosis.strip(),
-                    str(hora_supp), tomado, nota_supp,
-                ])
-            st.success(f"✅ {suplemento} guardado")
-            st.cache_data.clear()
+    # ── ESTEBAN: checklist predefinida ────────────────────
+    if username == "esteban":
+        st.caption("Marca los que tomaste hoy y agrega nota si es necesario.")
 
-    # Registros de hoy
-    st.divider()
-    st.markdown("**Registrado hoy:**")
-    supps_hoy = get_all_records(spreadsheet_id, "Suplementos")
-    supps_hoy = [r for r in supps_hoy if r.get("fecha") == fecha_str]
-    if supps_hoy:
-        for r in supps_hoy:
-            color = "green" if r.get("tomado") == "SÍ" else "orange"
-            nota = f" — {r.get('nota')}" if r.get("nota") else ""
-            st.markdown(
-                f":{color}[{'✅' if r.get('tomado')=='SÍ' else '⏳'} "
-                f"**{r.get('suplemento','')}** {r.get('dosis','')} "
-                f"· {r.get('hora_toma','')}]{nota}"
-            )
+        supps_guardados_hoy = get_all_records(spreadsheet_id, "Suplementos")
+        supps_guardados_hoy = [r for r in supps_guardados_hoy if r.get("fecha") == fecha_str]
+        ya_guardados = {r.get("suplemento", "") for r in supps_guardados_hoy}
+
+        checks_supp = {}
+        notas_supp = {}
+
+        for s in SUPLEMENTOS_ESTEBAN:
+            nombre = s["nombre"]
+            ya = nombre in ya_guardados
+            with st.expander(
+                f"{'✅' if ya else '⬜'} **{nombre}** — {s['dosis']} · {s['instruccion']}",
+                expanded=not ya,
+            ):
+                if ya:
+                    r = next((x for x in supps_guardados_hoy if x.get("suplemento") == nombre), {})
+                    st.success(f"Registrado a las {r.get('hora_toma', '—')}")
+                    if r.get("nota"):
+                        st.caption(f"Nota: {r.get('nota')}")
+                else:
+                    checks_supp[nombre] = st.checkbox("Lo tomé hoy", key=f"chk_{nombre}")
+                    notas_supp[nombre] = st.text_input(
+                        "Nota (opcional)", placeholder="sensación, hora exacta...",
+                        key=f"nota_{nombre}", label_visibility="collapsed"
+                    )
+
+        st.markdown("")
+        if st.button("💾 Guardar check-in de suplementos", type="primary", key="btn_supp_esteban"):
+            pendientes = [s for s in SUPLEMENTOS_ESTEBAN if s["nombre"] not in ya_guardados]
+            if not any(checks_supp.get(s["nombre"]) for s in pendientes):
+                st.warning("Marca al menos un suplemento.")
+            else:
+                with st.spinner("Guardando..."):
+                    ws = get_worksheet(spreadsheet_id, "Suplementos")
+                    for s in pendientes:
+                        nombre = s["nombre"]
+                        if checks_supp.get(nombre):
+                            append_row(ws, [
+                                ts(), fecha_str,
+                                nombre, s["dosis"],
+                                str(now_panama().time()),
+                                "SÍ",
+                                notas_supp.get(nombre, ""),
+                            ])
+                st.success("✅ Check-in guardado")
+                st.cache_data.clear()
+                st.rerun()
+
+    # ── ALE: entrada libre ────────────────────────────────
     else:
-        st.caption("Sin registros de suplementos hoy.")
+        st.caption("Registra cada suplemento por separado.")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            suplemento = st.text_input("Suplemento", placeholder="Magnesio, Vitamina C...",
+                                        key="supp_nombre")
+            dosis = st.text_input("Dosis", placeholder="1 cápsula, 500 mg...", key="supp_dosis")
+        with col2:
+            tomado = st.radio("¿Lo tomaste?", ["SÍ", "NO"], horizontal=True, key="supp_tomado")
+            hora_supp = st.time_input("Hora de toma", value=now_panama().time(), key="supp_hora")
+        with col3:
+            nota_supp = st.text_area("Nota", placeholder="sensación, con comida...",
+                                      height=100, key="supp_nota")
+
+        if st.button("💾 Guardar suplemento", type="primary", key="btn_supp_ale"):
+            if not suplemento.strip():
+                st.warning("Escribe el nombre del suplemento.")
+            else:
+                with st.spinner("Guardando..."):
+                    ws = get_worksheet(spreadsheet_id, "Suplementos")
+                    append_row(ws, [
+                        ts(), fecha_str,
+                        suplemento.strip(), dosis.strip(),
+                        str(hora_supp), tomado, nota_supp,
+                    ])
+                st.success(f"✅ {suplemento} guardado")
+                st.cache_data.clear()
+
+        # Registros de hoy
+        st.divider()
+        st.markdown("**Registrado hoy:**")
+        supps_hoy = get_all_records(spreadsheet_id, "Suplementos")
+        supps_hoy = [r for r in supps_hoy if r.get("fecha") == fecha_str]
+        if supps_hoy:
+            for r in supps_hoy:
+                color = "green" if r.get("tomado") == "SÍ" else "orange"
+                nota = f" — {r.get('nota')}" if r.get("nota") else ""
+                st.markdown(
+                    f":{color}[{'✅' if r.get('tomado')=='SÍ' else '⏳'} "
+                    f"**{r.get('suplemento','')}** {r.get('dosis','')}]{nota}"
+                )
+        else:
+            st.caption("Sin registros de suplementos hoy.")
 
 
 # ─── FOOTER ──────────────────────────────────────────────────────────────────
